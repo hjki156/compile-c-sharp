@@ -1,0 +1,138 @@
+name: 编译 C# 项目
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: '要克隆和编译的 C# 项目 Git 仓库 URL'
+        required: true
+        type: string
+      branch:
+        description: '分支名称 (可选，默认为主分支)'
+        required: false
+        type: string
+        default: 'main'
+      project_path:
+        description: '项目文件路径 (相对于仓库根目录，可选)'
+        required: false
+        type: string
+        default: ''
+      build_configuration:
+        description: '编译配置'
+        required: false
+        type: choice
+        options:
+          - Release
+          - Debug
+        default: 'Release'
+
+jobs:
+  build:
+    name: 克隆并编译 C# 项目
+    runs-on: windows-latest
+    
+    steps:
+      - name: 检出代码仓库
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+      
+      - name: 克隆目标 C# 项目
+        run: |
+          Write-Host "克隆仓库: ${{ inputs.repo_url }}"
+          $branchArg = if ("${{ inputs.branch }}" -ne "") { "--branch ${{ inputs.branch }}" } else { "" }
+          git clone $branchArg ${{ inputs.repo_url }} target-project
+          Write-Host "克隆完成"
+        shell: pwsh
+      
+      - name: 设置 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            6.0.x
+            7.0.x
+            8.0.x
+      
+      - name: 显示 .NET 信息
+        run: dotnet --info
+        shell: pwsh
+      
+      - name: 查找解决方案或项目文件
+        id: find-project
+        run: |
+          cd target-project
+          
+          $projectPath = "${{ inputs.project_path }}"
+          
+          if ($projectPath -ne "") {
+            Write-Host "使用指定的项目路径: $projectPath"
+            echo "project_file=$projectPath" >> $env:GITHUB_OUTPUT
+          } else {
+            # 查找 .sln 文件
+            $slnFiles = Get-ChildItem -Path . -Filter "*.sln" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            
+            if ($slnFiles) {
+              $relativePath = $slnFiles.FullName.Substring((Get-Location).Path.Length + 1)
+              Write-Host "找到解决方案文件: $relativePath"
+              echo "project_file=$relativePath" >> $env:GITHUB_OUTPUT
+            } else {
+              # 查找 .csproj 文件
+              $csprojFiles = Get-ChildItem -Path . -Filter "*.csproj" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              
+              if ($csprojFiles) {
+                $relativePath = $csprojFiles.FullName.Substring((Get-Location).Path.Length + 1)
+                Write-Host "找到项目文件: $relativePath"
+                echo "project_file=$relativePath" >> $env:GITHUB_OUTPUT
+              } else {
+                Write-Host "错误: 未找到 .sln 或 .csproj 文件"
+                exit 1
+              }
+            }
+          }
+        shell: pwsh
+      
+      - name: 还原依赖项
+        run: |
+          cd target-project
+          Write-Host "还原项目依赖: ${{ steps.find-project.outputs.project_file }}"
+          dotnet restore "${{ steps.find-project.outputs.project_file }}"
+        shell: pwsh
+      
+      - name: 编译项目
+        run: |
+          cd target-project
+          Write-Host "编译项目: ${{ steps.find-project.outputs.project_file }}"
+          Write-Host "配置: ${{ inputs.build_configuration }}"
+          dotnet build "${{ steps.find-project.outputs.project_file }}" --configuration ${{ inputs.build_configuration }} --no-restore
+        shell: pwsh
+      
+      - name: 查找编译输出
+        id: find-output
+        run: |
+          cd target-project
+          $outputDirs = Get-ChildItem -Path . -Filter "bin" -Recurse -Directory -ErrorAction SilentlyContinue
+          
+          if ($outputDirs) {
+            Write-Host "找到编译输出目录:"
+            foreach ($dir in $outputDirs) {
+              Write-Host "  - $($dir.FullName)"
+              $files = Get-ChildItem -Path $dir.FullName -Recurse -File | Select-Object -First 10
+              foreach ($file in $files) {
+                Write-Host "    * $($file.FullName)"
+              }
+            }
+          } else {
+            Write-Host "未找到 bin 目录"
+          }
+        shell: pwsh
+        continue-on-error: true
+      
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-output-${{ inputs.build_configuration }}
+          path: |
+            target-project/**/bin/${{ inputs.build_configuration }}/**/*
+            target-project/**/bin/**/*.exe
+            target-project/**/bin/**/*.dll
+          if-no-files-found: warn
