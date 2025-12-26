@@ -40,8 +40,11 @@ jobs:
       - name: 克隆目标 C# 项目
         run: |
           Write-Host "克隆仓库: ${{ inputs.repo_url }}"
-          $branchArg = if ("${{ inputs.branch }}" -ne "") { "--branch ${{ inputs.branch }}" } else { "" }
-          git clone $branchArg ${{ inputs.repo_url }} target-project
+          if ("${{ inputs.branch }}" -ne "") {
+            git clone --branch "${{ inputs.branch }}" "${{ inputs.repo_url }}" target-project
+          } else {
+            git clone "${{ inputs.repo_url }}" target-project
+          }
           Write-Host "克隆完成"
         shell: pwsh
       
@@ -65,6 +68,27 @@ jobs:
           $projectPath = "${{ inputs.project_path }}"
           
           if ($projectPath -ne "") {
+            # 验证路径不包含危险字符和路径遍历
+            if ($projectPath -match '\.\.') {
+              Write-Host "错误: 项目路径不能包含 '..' (路径遍历)"
+              exit 1
+            }
+            
+            # 确保路径存在且是相对路径
+            $fullPath = Join-Path (Get-Location) $projectPath
+            if (-not (Test-Path $fullPath)) {
+              Write-Host "错误: 指定的项目文件不存在: $projectPath"
+              exit 1
+            }
+            
+            # 确保文件在当前目录下
+            $resolvedPath = Resolve-Path $fullPath
+            $currentDir = (Get-Location).Path
+            if (-not $resolvedPath.Path.StartsWith($currentDir)) {
+              Write-Host "错误: 项目路径必须在克隆的仓库内"
+              exit 1
+            }
+            
             Write-Host "使用指定的项目路径: $projectPath"
             echo "project_file=$projectPath" >> $env:GITHUB_OUTPUT
           } else {
@@ -94,16 +118,26 @@ jobs:
       - name: 还原依赖项
         run: |
           cd target-project
-          Write-Host "还原项目依赖: ${{ steps.find-project.outputs.project_file }}"
-          dotnet restore "${{ steps.find-project.outputs.project_file }}"
+          $projectFile = "${{ steps.find-project.outputs.project_file }}"
+          Write-Host "还原项目依赖: $projectFile"
+          dotnet restore "$projectFile"
         shell: pwsh
       
       - name: 编译项目
         run: |
           cd target-project
-          Write-Host "编译项目: ${{ steps.find-project.outputs.project_file }}"
-          Write-Host "配置: ${{ inputs.build_configuration }}"
-          dotnet build "${{ steps.find-project.outputs.project_file }}" --configuration ${{ inputs.build_configuration }} --no-restore
+          $projectFile = "${{ steps.find-project.outputs.project_file }}"
+          $buildConfig = "${{ inputs.build_configuration }}"
+          
+          # 验证编译配置
+          if ($buildConfig -notin @("Release", "Debug")) {
+            Write-Host "错误: 无效的编译配置: $buildConfig"
+            exit 1
+          }
+          
+          Write-Host "编译项目: $projectFile"
+          Write-Host "配置: $buildConfig"
+          dotnet build "$projectFile" --configuration $buildConfig --no-restore
         shell: pwsh
       
       - name: 查找编译输出
