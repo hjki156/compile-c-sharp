@@ -31,6 +31,9 @@ jobs:
     name: 克隆并编译 C# 项目
     runs-on: windows-latest
     
+    permissions:
+      contents: read
+    
     steps:
       - name: 检出代码仓库
         uses: actions/checkout@v4
