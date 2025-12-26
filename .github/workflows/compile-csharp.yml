@@ -39,11 +39,30 @@ jobs:
       
       - name: 克隆目标 C# 项目
         run: |
-          Write-Host "克隆仓库: ${{ inputs.repo_url }}"
-          if ("${{ inputs.branch }}" -ne "") {
-            git clone --branch "${{ inputs.branch }}" "${{ inputs.repo_url }}" target-project
+          $repoUrl = "${{ inputs.repo_url }}"
+          $branch = "${{ inputs.branch }}"
+          
+          # 不记录完整的 URL（可能包含敏感信息）
+          if ($repoUrl -match 'https?://([^/@]+@)?([^/]+)') {
+            $sanitizedUrl = "https://" + $matches[2] + "/..."
+            Write-Host "克隆仓库: $sanitizedUrl"
           } else {
-            git clone "${{ inputs.repo_url }}" target-project
+            Write-Host "克隆仓库"
+          }
+          
+          # 使用环境变量避免命令注入
+          $env:GIT_REPO_URL = $repoUrl
+          $env:GIT_BRANCH = $branch
+          
+          if ($branch -ne "") {
+            git clone --branch $env:GIT_BRANCH $env:GIT_REPO_URL target-project
+          } else {
+            git clone $env:GIT_REPO_URL target-project
+          }
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "错误: 克隆失败"
+            exit 1
           }
           Write-Host "克隆完成"
         shell: pwsh
@@ -74,17 +93,18 @@ jobs:
               exit 1
             }
             
-            # 确保路径存在且是相对路径
-            $fullPath = Join-Path (Get-Location) $projectPath
+            # 使用完整路径处理避免路径注入
+            $currentDir = [System.IO.Path]::GetFullPath((Get-Location).Path)
+            $fullPath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $projectPath))
+            
+            # 确保路径存在
             if (-not (Test-Path $fullPath)) {
               Write-Host "错误: 指定的项目文件不存在: $projectPath"
               exit 1
             }
             
-            # 确保文件在当前目录下
-            $resolvedPath = Resolve-Path $fullPath
-            $currentDir = (Get-Location).Path
-            if (-not $resolvedPath.Path.StartsWith($currentDir)) {
+            # 确保文件在当前目录下（规范化路径比较）
+            if (-not $fullPath.StartsWith($currentDir, [StringComparison]::OrdinalIgnoreCase)) {
               Write-Host "错误: 项目路径必须在克隆的仓库内"
               exit 1
             }
