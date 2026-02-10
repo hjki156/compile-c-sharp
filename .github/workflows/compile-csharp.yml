@@ -1,0 +1,195 @@
+name: 编译 C# 项目
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: '要克隆和编译的 C# 项目 Git 仓库 URL'
+        required: true
+        type: string
+      branch:
+        description: '分支名称 (可选，默认为主分支)'
+        required: false
+        type: string
+        default: 'main'
+      project_path:
+        description: '项目文件路径 (相对于仓库根目录，可选)'
+        required: false
+        type: string
+        default: ''
+      build_configuration:
+        description: '编译配置'
+        required: false
+        type: choice
+        options:
+          - Release
+          - Debug
+        default: 'Release'
+
+jobs:
+  build:
+    name: 克隆并编译 C# 项目
+    runs-on: windows-latest
+    
+    permissions:
+      contents: read
+    
+    steps:
+      - name: 检出代码仓库
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+      
+      - name: 克隆目标 C# 项目
+        run: |
+          $repoUrl = "${{ inputs.repo_url }}"
+          $branch = "${{ inputs.branch }}"
+          
+          # 不记录完整的 URL（可能包含敏感信息）
+          if ($repoUrl -match 'https?://([^/@]+@)?([^/]+)') {
+            $sanitizedUrl = "https://" + $matches[2] + "/..."
+            Write-Host "克隆仓库: $sanitizedUrl"
+          } else {
+            Write-Host "克隆仓库"
+          }
+          
+          # 使用环境变量避免命令注入
+          $env:GIT_REPO_URL = $repoUrl
+          $env:GIT_BRANCH = $branch
+          
+          if ($branch -ne "") {
+            git clone --branch $env:GIT_BRANCH $env:GIT_REPO_URL target-project
+          } else {
+            git clone $env:GIT_REPO_URL target-project
+          }
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "错误: 克隆失败"
+            exit 1
+          }
+          Write-Host "克隆完成"
+        shell: pwsh
+      
+      - name: 设置 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            6.0.x
+            7.0.x
+            8.0.x
+      
+      - name: 显示 .NET 信息
+        run: dotnet --info
+        shell: pwsh
+      
+      - name: 查找解决方案或项目文件
+        id: find-project
+        run: |
+          cd target-project
+          
+          $projectPath = "${{ inputs.project_path }}"
+          
+          if ($projectPath -ne "") {
+            # 验证路径不包含危险字符和路径遍历
+            if ($projectPath -match '\.\.') {
+              Write-Host "错误: 项目路径不能包含 '..' (路径遍历)"
+              exit 1
+            }
+            
+            # 使用完整路径处理避免路径注入
+            $currentDir = [System.IO.Path]::GetFullPath((Get-Location).Path)
+            $fullPath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $projectPath))
+            
+            # 确保路径存在
+            if (-not (Test-Path $fullPath)) {
+              Write-Host "错误: 指定的项目文件不存在: $projectPath"
+              exit 1
+            }
+            
+            # 确保文件在当前目录下（规范化路径比较）
+            if (-not $fullPath.StartsWith($currentDir, [StringComparison]::OrdinalIgnoreCase)) {
+              Write-Host "错误: 项目路径必须在克隆的仓库内"
+              exit 1
+            }
+            
+            Write-Host "使用指定的项目路径: $projectPath"
+            echo "project_file=$projectPath" >> $env:GITHUB_OUTPUT
+          } else {
+            # 查找 .sln 文件
+            $slnFiles = Get-ChildItem -Path . -Filter "*.sln" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            
+            if ($slnFiles) {
+              $relativePath = $slnFiles.FullName.Substring((Get-Location).Path.Length + 1)
+              Write-Host "找到解决方案文件: $relativePath"
+              echo "project_file=$relativePath" >> $env:GITHUB_OUTPUT
+            } else {
+              # 查找 .csproj 文件
+              $csprojFiles = Get-ChildItem -Path . -Filter "*.csproj" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              
+              if ($csprojFiles) {
+                $relativePath = $csprojFiles.FullName.Substring((Get-Location).Path.Length + 1)
+                Write-Host "找到项目文件: $relativePath"
+                echo "project_file=$relativePath" >> $env:GITHUB_OUTPUT
+              } else {
+                Write-Host "错误: 未找到 .sln 或 .csproj 文件"
+                exit 1
+              }
+            }
+          }
+        shell: pwsh
+      
+      - name: 还原依赖项
+        run: |
+          cd target-project
+          $projectFile = "${{ steps.find-project.outputs.project_file }}"
+          Write-Host "还原项目依赖: $projectFile"
+          dotnet restore "$projectFile"
+        shell: pwsh
+      
+      - name: 编译项目
+        run: |
+          cd target-project
+          $projectFile = "${{ steps.find-project.outputs.project_file }}"
+          $buildConfig = "${{ inputs.build_configuration }}"
+          
+          # 验证编译配置
+          if ($buildConfig -notin @("Release", "Debug")) {
+            Write-Host "错误: 无效的编译配置: $buildConfig"
+            exit 1
+          }
+          
+          Write-Host "编译项目: $projectFile"
+          Write-Host "配置: $buildConfig"
+          dotnet build "$projectFile" --configuration $buildConfig --no-restore
+        shell: pwsh
+      
+      - name: 查找编译输出
+        id: find-output
+        run: |
+          cd target-project
+          $outputDirs = Get-ChildItem -Path . -Filter "bin" -Recurse -Directory -ErrorAction SilentlyContinue
+          
+          if ($outputDirs) {
+            Write-Host "找到编译输出目录:"
+            foreach ($dir in $outputDirs) {
+              Write-Host "  - $($dir.FullName)"
+              $files = Get-ChildItem -Path $dir.FullName -Recurse -File | Select-Object -First 10
+              foreach ($file in $files) {
+                Write-Host "    * $($file.FullName)"
+              }
+            }
+          } else {
+            Write-Host "未找到 bin 目录"
+          }
+        shell: pwsh
+        continue-on-error: true
+      
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-output-${{ inputs.build_configuration }}
+          path: |
+            target-project/**/bin/${{ inputs.build_configuration }}/**/*
+            target-project/**/bin/**/*.exe
+            target-project/**/bin/**/*.dll
+          if-no-files-found: warn
